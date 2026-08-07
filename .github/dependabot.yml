@@ -1,0 +1,31 @@
+# Enables automated dependency-update PRs so vulnerable/outdated packages
+# (see package.json — lodash/axios/minimist are pinned old on purpose) get
+# flagged and patched continuously, not just when CI happens to run.
+# NOTE: Dependabot *alerts* also need to be turned on manually in the repo:
+#   Settings -> Code security and analysis -> Dependabot alerts -> Enable
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "security"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "ci"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "docker"

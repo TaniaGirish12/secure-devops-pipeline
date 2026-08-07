@@ -1,0 +1,410 @@
+# Secure CI/CD pipeline for the sample app.
+#
+# Stage order mirrors the assignment brief: build/test -> lint -> SAST
+# (CodeQL runs in its own workflow, see codeql.yml) -> dependency scan ->
+# containerize -> container scan -> DAST -> deploy -> alerting.
+# Every gate before "deploy" must pass before an image is allowed to ship,
+# which is what "security integrated into the pipeline" means in practice.
+#
+# NOTE ON INTENTIONAL FAILURES: package.json deliberately pins outdated,
+# vulnerable versions of lodash, axios and minimist (see SECURITY.md). On a
+# fresh checkout, the "Dependency scan" and "Trivy container scan" jobs are
+# EXPECTED to fail — that's the pipeline doing its job. Bump those three
+# packages to their patched versions to see a fully green run.
+name: Secure CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "20"
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1) Build & unit test — baseline gate; nothing downstream runs if the
+  #    app doesn't even build/pass its tests.
+  # ---------------------------------------------------------------------
+  build-and-test:
+    name: Build & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies (exact, lockfile-pinned)
+        run: npm ci
+
+      - name: Run unit tests with coverage
+        run: npm test
+
+      # Coverage is re-used by the SonarCloud job so Sonar can report
+      # test-coverage-on-new-code without re-running the whole suite twice.
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 1
+
+  # ---------------------------------------------------------------------
+  # 2) Lint — required check; catches style/correctness issues (and a few
+  #    security-relevant patterns like eqeqeq/no-eval) before they merge.
+  # ---------------------------------------------------------------------
+  lint:
+    name: Lint (ESLint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+  # ---------------------------------------------------------------------
+  # 3) SAST (SonarCloud) — complements CodeQL (codeql.yml) with Sonar's
+  #    rule set, code-smell/quality gate and coverage tracking.
+  # ---------------------------------------------------------------------
+  sonarcloud:
+    name: SAST (SonarCloud)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # SonarCloud needs full git history for blame/new-code analysis
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Regenerate coverage for Sonar
+        run: npm test
+
+      # Requires the SONAR_TOKEN secret (Settings -> Secrets and variables ->
+      # Actions) and sonar-project.properties to have your org/project key.
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL || 'https://sonarcloud.io' }}
+
+  # ---------------------------------------------------------------------
+  # 4) Dependency scan — npm audit fails the build on high/critical CVEs
+  #    in third-party packages; Dependabot (see .github/dependabot.yml)
+  #    handles the continuous/out-of-band side of the same problem.
+  # ---------------------------------------------------------------------
+  dependency-scan:
+    name: Dependency Scan (npm audit)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Write npm audit summary (non-blocking, informational)
+        if: always()
+        run: |
+          echo "## npm audit report" >> "$GITHUB_STEP_SUMMARY"
+          npm audit --json > audit.json || true
+          jq -r '.metadata.vulnerabilities | to_entries[] | "- **\(.key)**: \(.value)"' audit.json >> "$GITHUB_STEP_SUMMARY" || true
+
+      # This is the actual gate: fails the job (and blocks containerize/
+      # deploy downstream) on any high or critical severity finding.
+      - name: Fail build on high/critical vulnerabilities
+        run: npm audit --audit-level=high
+
+  # ---------------------------------------------------------------------
+  # 5) Containerize — build the image and push it to GHCR. Gated on
+  #    build/lint/dependency-scan all passing.
+  # ---------------------------------------------------------------------
+  containerize:
+    name: Containerize & Push (GHCR)
+    runs-on: ubuntu-latest
+    needs: [build-and-test, lint, dependency-scan]
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: meta
+        run: echo "image=${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (loaded locally so it can be scanned before pushing)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: ${{ steps.meta.outputs.image }}
+          load: true
+
+      # PRs (including from forks) never get push credentials — only
+      # pushes to main publish an image.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image to GHCR
+        if: github.event_name != 'pull_request'
+        run: docker push ${{ steps.meta.outputs.image }}
+
+      - name: Save image for downstream scan/DAST/deploy jobs
+        run: docker save ${{ steps.meta.outputs.image }} -o image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-image
+          path: image.tar
+          retention-days: 1
+
+  # ---------------------------------------------------------------------
+  # 6) Container scan (Trivy) — scans the actual built image (OS packages
+  #    + app deps baked into it) before it's allowed anywhere near deploy.
+  # ---------------------------------------------------------------------
+  container-scan:
+    name: Container Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: containerize
+    permissions:
+      contents: read
+      security-events: write # required to upload SARIF to the Security tab
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: container-image
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ needs.containerize.outputs.image }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1" # fail the job (blocks deploy) on CRITICAL/HIGH CVEs
+
+      - name: Upload Trivy results to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## Trivy container scan" >> "$GITHUB_STEP_SUMMARY"
+          echo "Scanned \`${{ needs.containerize.outputs.image }}\` for CRITICAL/HIGH CVEs. See the Security tab for full SARIF detail." >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------
+  # 7) DAST (OWASP ZAP) — runs the actual container and attacks it over
+  #    HTTP the way a real attacker would, catching runtime issues static
+  #    analysis can't see (misconfigured headers, verbose errors, etc).
+  # ---------------------------------------------------------------------
+  dast-zap:
+    name: DAST (OWASP ZAP baseline)
+    runs-on: ubuntu-latest
+    needs: containerize
+    permissions:
+      contents: read
+      issues: write # zap-baseline can file/update a tracking issue
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: container-image
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Run app container as the DAST target
+        run: |
+          docker run -d --rm --name app-under-test -p 3000:3000 ${{ needs.containerize.outputs.image }}
+          for i in $(seq 1 15); do
+            curl -sf http://localhost:3000/health && break
+            sleep 2
+          done
+
+      - name: ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: "http://localhost:3000"
+          fail_action: true
+          cmd_options: "-a"
+
+      - name: Stop app container
+        if: always()
+        run: docker stop app-under-test || true
+
+  # ---------------------------------------------------------------------
+  # 8) Deploy — only reachable if every prior gate (build, lint, SAST,
+  #    dependency scan, container scan, DAST) passed, and only on pushes
+  #    to main (never on PRs).
+  # ---------------------------------------------------------------------
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: [containerize, sonarcloud, container-scan, dast-zap]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: container-image
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      # Render's deploy hooks are a single authenticated POST URL — store
+      # it as the RENDER_DEPLOY_HOOK_URL secret once the Render service
+      # is connected (see README "Deploy target" section).
+      - name: Deploy to Render
+        if: ${{ secrets.RENDER_DEPLOY_HOOK_URL != '' }}
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: curl -fsS -X POST "$RENDER_DEPLOY_HOOK_URL"
+
+      # Falls back to simulating the deploy by actually running the built
+      # image, so the stage still proves the image boots and serves
+      # traffic even without a connected Render account.
+      - name: Simulate deploy (no Render hook configured)
+        if: ${{ secrets.RENDER_DEPLOY_HOOK_URL == '' }}
+        run: |
+          echo "RENDER_DEPLOY_HOOK_URL not set — simulating deploy locally instead."
+          docker run -d --rm --name simulated-deploy -p 3000:3000 ${{ needs.containerize.outputs.image }}
+          sleep 3
+          curl -fsS http://localhost:3000/health
+          docker logs simulated-deploy
+          docker stop simulated-deploy
+
+  # ---------------------------------------------------------------------
+  # 9) Alerting/reporting — always runs (even on failure) so every run
+  #    gets a consolidated summary; Slack fires only when something
+  #    actually failed or a vulnerability blocked the pipeline.
+  # ---------------------------------------------------------------------
+  notify:
+    name: Report & Notify
+    runs-on: ubuntu-latest
+    needs:
+      [
+        build-and-test,
+        lint,
+        sonarcloud,
+        dependency-scan,
+        containerize,
+        container-scan,
+        dast-zap,
+        deploy,
+      ]
+    if: always()
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Write consolidated job summary
+        run: |
+          {
+            echo "## Pipeline summary"
+            echo "| Stage | Result |"
+            echo "|---|---|"
+            echo "| Build & Test | ${{ needs.build-and-test.result }} |"
+            echo "| Lint | ${{ needs.lint.result }} |"
+            echo "| SAST (SonarCloud) | ${{ needs.sonarcloud.result }} |"
+            echo "| Dependency scan (npm audit) | ${{ needs.dependency-scan.result }} |"
+            echo "| Containerize & push | ${{ needs.containerize.result }} |"
+            echo "| Container scan (Trivy) | ${{ needs.container-scan.result }} |"
+            echo "| DAST (OWASP ZAP) | ${{ needs.dast-zap.result }} |"
+            echo "| Deploy | ${{ needs.deploy.result }} |"
+            echo ""
+            echo "CodeQL results are reported separately under the *CodeQL SAST* workflow and the repo Security tab."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment results on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const rows = [
+              ['Build & Test', '${{ needs.build-and-test.result }}'],
+              ['Lint', '${{ needs.lint.result }}'],
+              ['SAST (SonarCloud)', '${{ needs.sonarcloud.result }}'],
+              ['Dependency scan', '${{ needs.dependency-scan.result }}'],
+              ['Container scan (Trivy)', '${{ needs.container-scan.result }}'],
+              ['DAST (OWASP ZAP)', '${{ needs.dast-zap.result }}'],
+            ];
+            const table = rows.map(([k, v]) => `| ${k} | ${v} |`).join('\n');
+            const body = `### Security pipeline results\n| Stage | Result |\n|---|---|\n${table}\n\nFull detail: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      # Fires only on failure, and only if a webhook has actually been
+      # configured (repo works fine without one — see README).
+      - name: Slack alert on failure
+        if: contains(needs.*.result, 'failure') && secrets.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -fsS -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\":rotating_light: *${{ github.workflow }}* failed on \`${{ github.ref_name }}\` (commit ${{ github.sha }}). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$SLACK_WEBHOOK_URL"

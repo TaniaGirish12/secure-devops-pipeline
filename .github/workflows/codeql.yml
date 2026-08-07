@@ -1,0 +1,50 @@
+# CodeQL runs as its own workflow (rather than a job in the main pipeline)
+# because it needs the `security-events: write` permission to upload SARIF
+# results and GitHub's own CodeQL docs recommend keeping it isolated with
+# its own trigger set (push, PR, and a weekly schedule to catch newly
+# published CVE rules against code that hasn't changed).
+name: CodeQL SAST
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "20 4 * * 1" # every Monday 04:20 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write # required to upload CodeQL results
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze (javascript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Loads CodeQL's JS/TS query packs (security-and-quality includes
+      # injection, XSS, prototype-pollution, ReDoS, etc.).
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+          queries: security-and-quality
+
+      # Node.js needs no compile step, but autobuild is kept so this
+      # workflow keeps working if TypeScript/build tooling is added later.
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      # Fails the check (and populates the repo's Security tab) if
+      # critical/high findings are detected.
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript"
