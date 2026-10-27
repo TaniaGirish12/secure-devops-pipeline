@@ -303,6 +303,10 @@ jobs:
     needs: [containerize, sonarcloud, container-scan, dast-zap]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: production
+    # `secrets` can't be read inside step-level `if:` conditions, so the
+    # secret is copied into job-level env, which `if:` can read.
+    env:
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
     steps:
       - name: Download image artifact
         uses: actions/download-artifact@v4
@@ -316,16 +320,14 @@ jobs:
       # it as the RENDER_DEPLOY_HOOK_URL secret once the Render service
       # is connected (see README "Deploy target" section).
       - name: Deploy to Render
-        if: ${{ secrets.RENDER_DEPLOY_HOOK_URL != '' }}
-        env:
-          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        if: ${{ env.RENDER_DEPLOY_HOOK_URL != '' }}
         run: curl -fsS -X POST "$RENDER_DEPLOY_HOOK_URL"
 
       # Falls back to simulating the deploy by actually running the built
       # image, so the stage still proves the image boots and serves
       # traffic even without a connected Render account.
       - name: Simulate deploy (no Render hook configured)
-        if: ${{ secrets.RENDER_DEPLOY_HOOK_URL == '' }}
+        if: ${{ env.RENDER_DEPLOY_HOOK_URL == '' }}
         run: |
           echo "RENDER_DEPLOY_HOOK_URL not set — simulating deploy locally instead."
           docker run -d --rm --name simulated-deploy -p 3000:3000 ${{ needs.containerize.outputs.image }}
@@ -357,6 +359,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
     steps:
       - name: Write consolidated job summary
         run: |
@@ -401,9 +405,7 @@ jobs:
       # Fires only on failure, and only if a webhook has actually been
       # configured (repo works fine without one — see README).
       - name: Slack alert on failure
-        if: contains(needs.*.result, 'failure') && secrets.SLACK_WEBHOOK_URL != ''
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        if: contains(needs.*.result, 'failure') && env.SLACK_WEBHOOK_URL != ''
         run: |
           curl -fsS -X POST -H 'Content-type: application/json' \
             --data "{\"text\":\":rotating_light: *${{ github.workflow }}* failed on \`${{ github.ref_name }}\` (commit ${{ github.sha }}). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
