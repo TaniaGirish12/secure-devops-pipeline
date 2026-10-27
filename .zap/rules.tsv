@@ -1,0 +1,7 @@
+# ZAP baseline rule overrides. Format: <rule id>	<IGNORE|WARN|FAIL>	<comment>
+# 90005 (alpha rule, enabled by -a) inspects the Sec-Fetch-* headers on the requests ZAP itself
+# sends. It describes the scanner client, not the application, so it cannot be fixed in app code.
+90005	IGNORE	(Sec-Fetch-Dest Header is Missing - scanner-side finding, not an app issue)
+# 10049 (Non-Storable Content) is informational: it notes that responses carry Cache-Control: no-store.
+# That is intentional for a dynamic JSON API that can return user-supplied data.
+10049	IGNORE	(Non-Storable Content - no-store is intentional for API responses)

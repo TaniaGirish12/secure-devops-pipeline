@@ -1,16 +1,15 @@
 # Secure CI/CD pipeline for the sample app.
 #
-# Stage order mirrors the assignment brief: build/test -> lint -> SAST
+# Stage order: build/test -> lint -> SAST
 # (CodeQL runs in its own workflow, see codeql.yml) -> dependency scan ->
 # containerize -> container scan -> DAST -> deploy -> alerting.
 # Every gate before "deploy" must pass before an image is allowed to ship,
 # which is what "security integrated into the pipeline" means in practice.
 #
-# NOTE ON INTENTIONAL FAILURES: package.json deliberately pins outdated,
-# vulnerable versions of lodash, axios and minimist (see SECURITY.md). On a
-# fresh checkout, the "Dependency scan" and "Trivy container scan" jobs are
-# EXPECTED to fail — that's the pipeline doing its job. Bump those three
-# packages to their patched versions to see a fully green run.
+# NOTE: the first commit in this repo deliberately pinned outdated, vulnerable
+# versions of lodash, axios and minimist (see SECURITY.md); on that commit the
+# "Dependency scan" and "Trivy container scan" jobs fail, which is the gate
+# working. The current tree has those findings fixed, so it should run green.
 name: Secure CI/CD Pipeline
 
 on:
@@ -286,6 +285,8 @@ jobs:
         with:
           target: "http://localhost:3000"
           fail_action: true
+          # Per-rule overrides with documented reasons (see SECURITY.md).
+          rules_file_name: ".zap/rules.tsv"
           cmd_options: "-a"
 
       - name: Stop app container
