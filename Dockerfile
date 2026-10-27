@@ -1,14 +1,20 @@
-# ---- Build stage: install deps with dev tooling available ----
-FROM node:20-alpine AS build
+# ---- Build stage: install deps with npm available ----
+FROM node:22-alpine AS build
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY src ./src
 
 # ---- Runtime stage: minimal image, no build tools, no dev deps ----
-FROM node:20-alpine AS runtime
+FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
+
+# Pull in the latest Alpine security patches (e.g. openssl) on top of the base image,
+# then drop npm/npx: the app only needs the node binary at runtime, and npm's bundled
+# packages (tar, glob, ...) are a frequent source of scanner findings.
+RUN apk upgrade --no-cache \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 # Run as a non-root user so a container escape doesn't hand out root.
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
