@@ -1,12 +1,12 @@
 # ---- Build stage: install deps with npm available ----
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY src ./src
 
 # ---- Runtime stage: minimal image, no build tools, no dev deps ----
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
