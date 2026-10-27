@@ -42,8 +42,9 @@ jobs:
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
 
-      # Fails the check (and populates the repo's Security tab) if
-      # critical/high findings are detected.
+      # Uploads results to the repo's Security tab. The job itself does not
+      # fail on findings; to make CodeQL block merges, mark this check (and a
+      # code-scanning alert threshold) as required in the branch rules.
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@v3
         with:

@@ -5,9 +5,11 @@ pipeline that integrates security checks at every stage: source → build/test
 → lint → SAST → dependency scan → containerize → container scan → DAST →
 deploy → alerting.
 
-This was built for a Software Security course assignment ("Build a Secure
-CI/CD Pipeline"). The app itself is intentionally minimal — the pipeline is
-the point.
+The app itself is intentionally minimal — the pipeline is the point. The
+repo's git history shows the full loop: the first commit ships deliberately
+vulnerable dependencies so every scanner has something real to catch, and the
+later commits fix each finding until `npm audit`, Trivy and the ZAP baseline
+all pass.
 
 ## Architecture
 
@@ -112,8 +114,8 @@ curl http://localhost:3000/health
 npm audit --audit-level=high                 # dependency scan
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
   aquasec/trivy image secure-devops-demo       # container scan
-docker run --rm -t owasp/zap2docker-stable \
-  zap-baseline.py -t http://host.docker.internal:3000  # DAST (app must be running)
+docker run --rm -v "$PWD/.zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
+  zap-baseline.py -t http://host.docker.internal:3000 -a -c rules.tsv  # DAST (app must be running)
 ```
 
 ## One-time repo setup (for anyone forking/running this on real GitHub)
