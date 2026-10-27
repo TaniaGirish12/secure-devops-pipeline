@@ -57,7 +57,7 @@ jobs:
       # Coverage is re-used by the SonarCloud job so Sonar can report
       # test-coverage-on-new-code without re-running the whole suite twice.
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: coverage/
@@ -204,7 +204,7 @@ jobs:
         run: docker save ${{ steps.meta.outputs.image }} -o image.tar
 
       - name: Upload image artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: container-image
           path: image.tar
