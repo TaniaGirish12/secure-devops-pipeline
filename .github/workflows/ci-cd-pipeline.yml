@@ -233,7 +233,9 @@ jobs:
         run: docker load -i image.tar
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@0.24.0
+        # Pinned to the commit SHA of v0.36.0 (not the tag): tags on this repo have
+        # been republished before, and a SHA cannot be silently repointed.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ needs.containerize.outputs.image }}
           format: sarif
@@ -266,6 +268,12 @@ jobs:
       contents: read
       issues: write # zap-baseline can file/update a tracking issue
     steps:
+      # The ZAP action reads .zap/rules.tsv from the checked-out workspace. Without
+      # this step the file is missing, the action silently skips the rules, and the
+      # documented (ignored) alerts fail the scan.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Download image artifact
         uses: actions/download-artifact@v4
         with:
